@@ -12,7 +12,7 @@
 # License for the specific language governing permissions and limitations under
 # the License.
 import datetime
-
+import warnings
 from unittest import TestCase
 from common import BaseTest
 import pyschema
@@ -36,16 +36,17 @@ class TextRecord2(Record):
 
 
 class TextRecord3(Record):
-    _avro_namespace_ = "blah.blah"
+    _namespace = "blah.blah"
     t = Text()
 
 
 class SomeAvroRecord(Record):
+    """SomeAvroRecord contains a lot of cool stuff"""
     a = Text()
     b = Integer()
     c = Bytes()
     d = Boolean()
-    e = Float()
+    e = Float(description="hello world!")
     f = Enum([
         "FOO", "bar"
     ])
@@ -64,17 +65,19 @@ class SomeAvroRecord(Record):
     s = SubRecord(TextRecord, nullable=False)
     t = SubRecord(TextRecord2, nullable=False)
     u = SubRecord(TextRecord3)
+    v = SubRecord(TextRecord3) 
 
 
 hand_crafted_schema_dict = {
     "type": "record",
     "name": "SomeAvroRecord",
+    "doc": "SomeAvroRecord contains a lot of cool stuff",
     "fields": [
         {"name": "a", "type": ["null", "string"], "default": None},
         {"name": "b", "type": ["null", "long"], "default": None},
         {"name": "c", "type": ["null", "bytes"], "default": None},
         {"name": "d", "type": ["null", "boolean"], "default": None},
-        {"name": "e", "type": ["null", "double"], "default": None},
+        {"name": "e", "type": ["null", "double"], "default": None, "doc": "hello world!"},
         {"name": "f", "type": ["null", {
             "type": "enum",
             "name": "ENUM",
@@ -123,6 +126,9 @@ hand_crafted_schema_dict = {
              "type": "record",
              "namespace": "blah.blah",
              "fields": [{"name": "t", "type": ["null", "string"], "default": None}]}],
+             "default": None
+        },
+        {"name": "v", "type": ["null", "blah.blah.TextRecord3"],
              "default": None
         }
     ]
@@ -186,7 +192,7 @@ class TestAvro(BaseTest):
         self.assertEquals(
             names,
             ("a", "b", "c", "d", "e", "f", "g", "h", "i", "j", "k", "l", "m",
-             "n", "o", "p", "q", "r", "s", "t", "u")
+             "n", "o", "p", "q", "r", "s", "t", "u", "v")
         )
         self.assertEquals(schema["type"], "record")
         self.assertEquals(schema["name"], "SomeAvroRecord")
@@ -226,6 +232,7 @@ class TestAvro(BaseTest):
             s=TextRecord(t="ace"),
             t=TextRecord2(t="look"),
             u=TextRecord3(t="dog"),
+            v=TextRecord3(t="namespaceTest")
         )
         avro_string = pyschema_extensions.avro.dumps(s)
         new_s = pyschema_extensions.avro.loads(
@@ -246,8 +253,8 @@ class TestAvro(BaseTest):
         self.assertTrue("bar" in new_s.j)
         self.assertEqual(new_s.j["foo"].t, "bar")
         self.assertEqual(new_s.j["bar"].t, "baz")
-        self.assertEquals(new_s.k, datetime.date(2014,4,20))
-        self.assertEquals(new_s.l, datetime.datetime(2014,4,20,12,0,0))
+        self.assertEquals(new_s.k, datetime.date(2014, 4, 20))
+        self.assertEquals(new_s.l, datetime.datetime(2014, 4, 20, 12, 0, 0))
         self.assertEquals(new_s.m, u"spotify")
         self.assertEquals(new_s.n, 1)
         self.assertEquals(new_s.o, all_bytes)
@@ -257,8 +264,8 @@ class TestAvro(BaseTest):
         self.assertEquals(new_s.s.t, u"ace")
         self.assertEquals(new_s.t.t, u"look")
         self.assertEquals(new_s.u.t, u"dog")
-        self.assertEquals(new_s.u._avro_namespace_, u"blah.blah")
-
+        self.assertEquals(new_s.u._namespace, u"blah.blah")
+        self.assertEquals(new_s.v._namespace, u"blah.blah")
 
     def test_unset_list(self):
         @no_auto_store()
@@ -343,3 +350,58 @@ class TestExtraFields(TestCase):
         line = '{"field": {"long": 8}, "invalid_field": {"long": 8}}'
 
         self.assertRaises(ParseError, lambda: pyschema_extensions.avro.loads(line, schema=ValidRecord))
+
+
+class TestNamespaceMigration(TestCase):
+    def test_old_data(self):
+        """
+        Test that we are able to read data created without namespace after namespace is added.
+        """
+        test_store = pyschema.core.SchemaStore()
+
+        @test_store.add_record
+        @no_auto_store()
+        class NamespacedSubRecord(Record):
+            _namespace = 'pyschema'
+            a = Text()
+
+        @test_store.add_record
+        @no_auto_store()
+        class NamespacedMainRecord(Record):
+            _namespace = 'pyschema'
+            sub_record = SubRecord(NamespacedSubRecord)
+
+        # This data does not have a subrecord but we should be able to parse it anyways
+        legacy_data = '{"sub_record": {"NamespacedSubRecord": {"a": {"string": "test"}}}}'
+        pyschema_extensions.avro.loads(legacy_data, schema=NamespacedMainRecord)
+
+        legacy_data_with_record_class = ('{"$schema": "NamespacedMainRecord", "sub_record":'
+                                         '{"NamespacedSubRecord": {"a": {"string": "test"}}}}')
+        pyschema_extensions.avro.loads(legacy_data_with_record_class, record_store=test_store)
+
+
+class TestEnumTypeName(TestCase):
+    def test_no_name(self):
+        # when no name is declared, use the dummy "ENUM" name
+        val = Enum(["FOO", "BAR"], nullable=True).avro_dump("FOO")
+        self.assertIn("ENUM", val)
+
+    def test_name(self):
+        val = Enum(["FOO", "BAR"], nullable=True, name="EType").avro_dump("BAR")
+        self.assertIn("EType", val)
+        self.assertNotIn("ENUM", val)
+
+
+class TestExtraFields(TestCase):
+    def test_ignore_extra(self):
+        test_store = pyschema.core.SchemaStore()
+
+        @test_store.add_record
+        @no_auto_store()
+        class EmptySchema(Record):
+            pass
+
+        data = '{"$schema": "EmptySchema", "not_in_schema": 1}'
+        with warnings.catch_warnings(record=True) as ws:
+            pyschema_extensions.avro.loads(data, record_store=test_store)
+        self.assertEquals(len(ws), 1)

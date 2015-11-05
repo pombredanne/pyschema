@@ -27,6 +27,7 @@ Usage:
 "type": "record", "name": "MyRecord"}'
 
 """
+import warnings
 from pyschema import core
 from pyschema.types import Field, Boolean, Integer, Float
 from pyschema.types import Bytes, Text, Enum, List, Map, SubRecord
@@ -145,9 +146,14 @@ class ListMixin:
             ]
 
 
-### `Enum` extensions
 @Enum.mixin
 class EnumMixin:
+    @property
+    def avro_type_name(self):
+        if self.name is None:
+            return "ENUM"
+        return self.name
+
     def simplified_avro_type_schema(self, state):
         return {
             "type": "enum",
@@ -163,11 +169,7 @@ class SubRecordMixin:
 
     @property
     def avro_type_name(self):
-        if hasattr(self._schema, '_avro_namespace_'):
-            return '.'.join([self._schema._avro_namespace_,
-                             self._schema._schema_name])
-        else:
-            return self._schema._schema_name
+        return core.get_full_name(self._schema)
 
     def avro_dump(self, obj):
         if obj is None:
@@ -177,13 +179,26 @@ class SubRecordMixin:
         else:
             return to_json_compatible(obj)
 
+    def _get_record_data(self, obj):
+        """
+        Try to get the data for this subrecord using the full_name including namespace.
+        If no data is given for the fullname, we will fallback to use the SubRecord name without namespace.
+
+        Doing this allows namespace addition to a schema while being able to read legacy data missing a namespace.
+        """
+        if self.avro_type_name in obj:
+            return obj[self.avro_type_name]
+        else:
+            base_name = self.avro_type_name.split('.')[-1]
+            return obj[base_name]
+
     def avro_load(self, obj):
         if obj is None:
             return None
         if self.nullable:
             return from_json_compatible(
                 self._schema,
-                obj[self.avro_type_name]
+                self._get_record_data(obj)
             )
         else:
             return from_json_compatible(
@@ -240,16 +255,15 @@ class SchemaGeneratorState(object):
 def get_schema_dict(record, state=None):
     state = state or SchemaGeneratorState()
 
-    if hasattr(record, '_avro_namespace_'):
-        namespace = record._avro_namespace_
-        record_name = namespace + '.' + record._schema_name
+    full_name = core.get_full_name(record)
+    if full_name in state.declared_records:
+        return full_name
+    state.declared_records.add(full_name)
+
+    if '.' in full_name:
+        namespace, _ = full_name.rsplit('.', 1)
     else:
         namespace = None
-        record_name = record._schema_name
-
-    if record_name in state.declared_records:
-        return record_name
-    state.declared_records.add(record_name)
 
     avro_record = {
         "type": "record",
@@ -257,6 +271,9 @@ def get_schema_dict(record, state=None):
     }
     if namespace:
         avro_record["namespace"] = namespace
+
+    if record.__doc__ is not None:
+        avro_record["doc"] = record.__doc__
 
     avro_fields = []
     for field_name, field_type in record._fields.iteritems():
@@ -266,6 +283,8 @@ def get_schema_dict(record, state=None):
         }
         if field_type.default is not core.NO_DEFAULT:
             field_spec["default"] = field_type.avro_default_value()
+        if field_type.description is not None:
+            field_spec["doc"] = field_type.description
         avro_fields.append(field_spec)
 
     avro_record["fields"] = avro_fields
@@ -295,11 +314,25 @@ def from_json_compatible(schema, dct):
     for key in dct:
         field_type = schema._fields.get(key)
         if field_type is None:
-            raise core.ParseError("Unexpected field encountered in line for record %s: %s" % (schema.__name__, key))
+            warnings.warn("Unexpected field encountered in line for record %s: %r" % (schema.__name__, key))
+            continue
         kwargs[key] = field_type.avro_load(dct[key])
 
     return schema(**kwargs)
 
 
-def loads(s, record_store=None, schema=None):
+def loads(
+    s,
+    record_store=None,
+    schema=None,
+    record_class=None  # deprecated - replaced by `schema`
+):
+    if record_class is not None:
+        warnings.warn(
+            "The record_class parameter is deprecated in favour of schema",
+            DeprecationWarning,
+            stacklevel=2
+        )
+        schema = record_class
+
     return core.loads(s, record_store, schema, from_json_compatible)

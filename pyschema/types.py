@@ -15,8 +15,23 @@ import datetime
 
 import core
 import copy
-from core import ParseError, Field
+from core import ParseError, Field, auto_store, PySchema
 import binascii
+try:
+    from collections import OrderedDict
+except ImportError:
+    from ordereddict import OrderedDict
+
+
+def ordereddict_push_front(dct, key, value):
+    """Set a value at the front of an OrderedDict
+
+    The original dict isn't modified, instead a copy is returned
+    """
+    d = OrderedDict()
+    d[key] = value
+    d.update(dct)
+    return d
 
 
 class Text(Field):
@@ -71,6 +86,9 @@ class Bytes(Field):
             return self._dump_utf8_codepoints(binary_data)
         return self._dump_b64(binary_data)
 
+    def is_similar_to(self, other):
+        return super(Bytes, self).is_similar_to(other) and self.custom_encoding == other.custom_encoding
+
 
 class List(Field):
     """List of one other Field type
@@ -99,13 +117,27 @@ class List(Field):
         #  avoid default-sharing between records
         return copy.deepcopy(self.default)
 
+    def is_similar_to(self, other):
+        return super(List, self).is_similar_to(other) and self.field_type.is_similar_to(other.field_type)
+
+    def repr_vars(self):
+        return ordereddict_push_front(
+            super(List, self).repr_vars(),
+            "field_type",
+            repr(self.field_type)
+        )
+
 
 class Enum(Field):
     _field_type = Text()  # don't change
 
-    def __init__(self, values, **kwargs):
+    def __init__(self, values, name=None, **kwargs):
         super(Enum, self).__init__(**kwargs)
         self.values = set(values)
+        self.name = name
+
+        if name is not None and PySchema.auto_register:
+            auto_store.add_enum(self)
 
     def dump(self, obj):
         if obj not in self.values:
@@ -122,6 +154,16 @@ class Enum(Field):
                 % (parsed, tuple(self.values)))
         return parsed
 
+    def is_similar_to(self, other):
+        return super(Enum, self).is_similar_to(other) and self.values == other.values
+
+    def repr_vars(self):
+        return OrderedDict([
+            ("values", self.values),
+            ("name", repr(self.name))
+        ] + super(Enum, self).repr_vars().items()
+        )
+
 
 class Integer(Field):
     def __init__(self, size=8, **kwargs):
@@ -137,6 +179,16 @@ class Integer(Field):
         if not isinstance(obj, (int, long, type(None))) or isinstance(obj, bool):
             raise ParseError("%r is not a valid Integer" % (obj,))
         return obj
+
+    def is_similar_to(self, other):
+        return super(Integer, self).is_similar_to(other) and self.size == other.size
+
+    def repr_vars(self):
+        return ordereddict_push_front(
+            super(Integer, self).repr_vars(),
+            "size",
+            self.size
+        )
 
 
 class Boolean(Field):
@@ -167,9 +219,12 @@ class Float(Field):
         return float(obj)
 
     def load(self, obj):
-        if not isinstance(obj, float):
+        if not isinstance(obj, (float, int, long)):
             raise ParseError("Invalid value for Float field: %r" % obj)
         return float(obj)
+
+    def is_similar_to(self, other):
+        return super(Float, self).is_similar_to(other) and self.size == other.size
 
 
 class Date(Text):
@@ -180,7 +235,9 @@ class Date(Text):
 
     def load(self, obj):
         try:
-            return datetime.datetime.strptime(obj, "%Y-%m-%d").date()
+            # This is much faster than calling strptime
+            (year, month, day) = obj.split('-')
+            return datetime.date(int(year), int(month), int(day))
         except ValueError:
             raise ValueError("Invalid value for Date field: %r" % obj)
 
@@ -236,6 +293,16 @@ class SubRecord(Field):
         #  avoid default-sharing between records
         return copy.deepcopy(self.default)
 
+    def is_similar_to(self, other):
+        return super(SubRecord, self).is_similar_to(other) and self._schema == other._schema
+
+    def repr_vars(self):
+        return ordereddict_push_front(
+            super(SubRecord, self).repr_vars(),
+            "schema",
+            self._schema._schema_name
+        )
+
 
 class Map(Field):
     """List of one other Field type
@@ -271,3 +338,13 @@ class Map(Field):
     def default_value(self):
         #  avoid default-sharing between records
         return copy.deepcopy(self.default)
+
+    def is_similar_to(self, other):
+        return super(Map, self).is_similar_to(other) and self.value_type.is_similar_to(other.value_type)
+
+    def repr_vars(self):
+        return ordereddict_push_front(
+            super(Map, self).repr_vars(),
+            "value_type",
+            repr(self.value_type)
+        )
